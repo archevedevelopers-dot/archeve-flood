@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt fastapi "uvicorn[standard]"
 COPY flood_hazard.py server.py ./
 
 ENV PORT=8820
-ENV FLOOD_PATH=/tmp/aqueduct_rp100.tif
+ENV FLOOD_DIR=/tmp
 EXPOSE 8820
 
 CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8820}"]

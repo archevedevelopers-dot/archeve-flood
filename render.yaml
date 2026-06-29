@@ -11,5 +11,5 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      - key: FLOOD_PATH
-        value: /tmp/aqueduct_rp100.tif
+      - key: FLOOD_DIR
+        value: /tmp

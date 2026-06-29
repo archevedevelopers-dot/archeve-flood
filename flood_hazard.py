@@ -111,28 +111,27 @@ def _guard(w, s, e, n):
 
 
 def exposure(geom=None, bbox=None, ftype="riverine", rp=100, scenario="historical"):
-    from rasterio import Affine
     g = shape(geom) if geom is not None else None
     with _open(ftype, rp, scenario) as ds:
         w, s, e, n = g.bounds if g is not None else bbox
         _guard(w, s, e, n)
         win = from_bounds(w, s, e, n, ds.transform)
-        h, wd = int(round(win.height)), int(round(win.width))
-        scale = max(h, wd) / float(EXP_MAX_PX)
-        if scale > 1:  # downsample large extents so the read+mask stays fast on free CPU
-            oh, ow = max(1, int(h / scale)), max(1, int(wd / scale))
-        else:
-            scale, oh, ow = 1.0, max(1, h), max(1, wd)
-        band = ds.read(1, window=win, out_shape=(oh, ow)).astype("float32")
-        if g is not None:  # mask to the polygon at the read resolution
+        if g is not None:
+            # full-res window read + polygon mask using the native window transform —
+            # robust across rasterio versions / overviews (downsampled masking was not).
+            band = ds.read(1, window=win).astype("float32")
             from rasterio.features import geometry_mask
-            from rasterio.transform import from_bounds as tr_from_bounds
-            # use the window's true geographic bounds + the read shape — robust across
-            # rasterio versions and overview levels (window_transform×scale was fragile)
-            wb = rasterio.windows.bounds(win, ds.transform)
-            dt = tr_from_bounds(wb[0], wb[1], wb[2], wb[3], ow, oh)
-            inside = geometry_mask([mapping(g)], out_shape=(oh, ow), transform=dt, invert=True)
+            inside = geometry_mask([mapping(g)], out_shape=band.shape,
+                                   transform=ds.window_transform(win), invert=True)
             band = np.where(inside, band, NODATA)
+            scale = 1.0
+        else:
+            h, wd = int(round(win.height)), int(round(win.width))
+            scale = max(h, wd) / float(EXP_MAX_PX)
+            if scale > 1:
+                band = ds.read(1, window=win, out_shape=(max(1, int(h / scale)), max(1, int(wd / scale))))
+            else:
+                scale, band = 1.0, ds.read(1, window=win)
         valid = band[band != NODATA]
         flooded = valid[valid > 0]
         if valid.size == 0:

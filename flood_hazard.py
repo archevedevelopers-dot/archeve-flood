@@ -124,9 +124,13 @@ def exposure(geom=None, bbox=None, ftype="riverine", rp=100, scenario="historica
         else:
             scale, oh, ow = 1.0, max(1, h), max(1, wd)
         band = ds.read(1, window=win, out_shape=(oh, ow)).astype("float32")
-        if g is not None:  # mask to the polygon at the downsampled resolution
+        if g is not None:  # mask to the polygon at the read resolution
             from rasterio.features import geometry_mask
-            dt = ds.window_transform(win) * Affine.scale(win.width / ow, win.height / oh)
+            from rasterio.transform import from_bounds as tr_from_bounds
+            # use the window's true geographic bounds + the read shape — robust across
+            # rasterio versions and overview levels (window_transform×scale was fragile)
+            wb = rasterio.windows.bounds(win, ds.transform)
+            dt = tr_from_bounds(wb[0], wb[1], wb[2], wb[3], ow, oh)
             inside = geometry_mask([mapping(g)], out_shape=(oh, ow), transform=dt, invert=True)
             band = np.where(inside, band, NODATA)
         valid = band[band != NODATA]

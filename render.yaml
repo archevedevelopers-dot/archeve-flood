@@ -1,0 +1,15 @@
+# Render Blueprint — Archeve flood-hazard API (free tier).
+# New → Blueprint → pick the repo. The app boot-downloads the 88 MB Aqueduct raster.
+services:
+  - type: web
+    name: archeve-flood
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: oregon
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: FLOOD_PATH
+        value: /tmp/aqueduct_rp100.tif

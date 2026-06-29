@@ -111,23 +111,24 @@ def _guard(w, s, e, n):
 
 
 def exposure(geom=None, bbox=None, ftype="riverine", rp=100, scenario="historical"):
+    from rasterio import Affine
+    g = shape(geom) if geom is not None else None
     with _open(ftype, rp, scenario) as ds:
-        if geom is not None:
-            g = shape(geom)
-            w, s, e, n = g.bounds
-            _guard(w, s, e, n)
-            arr, _ = rio_mask(ds, [mapping(g)], crop=True, nodata=NODATA, filled=True)
-            band, scale = arr[0], 1.0
+        w, s, e, n = g.bounds if g is not None else bbox
+        _guard(w, s, e, n)
+        win = from_bounds(w, s, e, n, ds.transform)
+        h, wd = int(round(win.height)), int(round(win.width))
+        scale = max(h, wd) / float(EXP_MAX_PX)
+        if scale > 1:  # downsample large extents so the read+mask stays fast on free CPU
+            oh, ow = max(1, int(h / scale)), max(1, int(wd / scale))
         else:
-            w, s, e, n = bbox
-            _guard(w, s, e, n)
-            win = from_bounds(w, s, e, n, ds.transform)
-            h, wd = int(round(win.height)), int(round(win.width))
-            scale = max(h, wd) / float(EXP_MAX_PX)
-            if scale > 1:
-                band = ds.read(1, window=win, out_shape=(max(1, int(h / scale)), max(1, int(wd / scale))))
-            else:
-                scale, band = 1.0, ds.read(1, window=win)
+            scale, oh, ow = 1.0, max(1, h), max(1, wd)
+        band = ds.read(1, window=win, out_shape=(oh, ow)).astype("float32")
+        if g is not None:  # mask to the polygon at the downsampled resolution
+            from rasterio.features import geometry_mask
+            dt = ds.window_transform(win) * Affine.scale(win.width / ow, win.height / oh)
+            inside = geometry_mask([mapping(g)], out_shape=(oh, ow), transform=dt, invert=True)
+            band = np.where(inside, band, NODATA)
         valid = band[band != NODATA]
         flooded = valid[valid > 0]
         if valid.size == 0:

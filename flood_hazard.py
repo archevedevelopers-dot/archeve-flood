@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Archeve — flood-hazard raster service (WRI Aqueduct Floods, CC BY 4.0).
+Archeve — flood-hazard raster service (Deltares Global Flood Maps, CC BY 4.0).
 
-Serves modeled flood depth for ANY of:
-  type      : riverine | coastal
-  rp        : 2 5 10 25 50 100 250 500 1000   (return period, years)
-  scenario  : historical | 2050 | 2080        (riverine future = RCP8.5)
+Serves modeled COASTAL flood depth (GTSM surge+tide extreme sea levels, extended
+overland with a bathtub-plus-attenuation model on NASADEM) for:
+  rp        : 2 5 10 25 50 100 250     (return period, years)
+  scenario  : today (2018) | 2050      (sea-level-rise year)
 …as point depth, zonal exposure, a clipped GeoTIFF, and (in server.py) map tiles.
-Global coverage → India / UAE / KSA / Jordan / Oman / Kuwait all included.
+Coverage: India + the Gulf (UAE, KSA, Jordan, Oman, Kuwait) coastlines.
 
-Each layer's 88 MB GeoTIFF boot-downloads on first use from the public S3 bucket
-and is cached in /tmp (overviews built once for fast tiles). EPSG:4326, ~1 km.
-Screening-grade orientation — not a hydraulic model.
+Rasters are pre-clipped ~1 km COGs baked into the image under data/ — no runtime
+download, instant boot, no external bucket dependency. EPSG:4326.
+Screening-grade orientation — not a hydraulic model or an approval basis.
 """
 import os
 import math
@@ -19,71 +19,59 @@ import math
 import numpy as np
 import rasterio
 from rasterio.windows import from_bounds, Window
-from rasterio.mask import mask as rio_mask
 from shapely.geometry import shape, mapping
 
-BASE_URL = "https://wri-projects.s3.amazonaws.com/AqueductFloodTool/download/v2"
-CACHE_DIR = os.environ.get("FLOOD_DIR", "/tmp")
+DATA_DIR = os.environ.get(
+    "FLOOD_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+)
 NODATA = -9999.0
 MAX_DEG = 35.0
 EXP_MAX_PX = 1400
 
-RIVERINE_RP = {2: "00002", 5: "00005", 10: "00010", 25: "00025", 50: "00050",
-               100: "00100", 250: "00250", 500: "00500", 1000: "01000"}
-COASTAL_RP = {2: "0002", 5: "0005", 10: "0010", 25: "0025", 50: "0050",
-              100: "0100", 250: "0250", 500: "0500", 1000: "1000"}
-RPS = sorted(RIVERINE_RP.keys())
-
-_ensured = set()
+RPS = [2, 5, 10, 25, 50, 100, 250]
+YEARS = [2018, 2050]
+SOURCE = "Deltares Global Flood Maps — coastal, NASADEM ~1 km (CC BY 4.0)"
 
 
-def layer_filename(ftype="riverine", rp=100, scenario="historical"):
+def scenario_year(scenario) -> int:
+    """Map a scenario id to a sea-level-rise year. Anything mentioning 2050/slr
+    resolves to 2050; everything else is present-day (2018)."""
+    s = str(scenario).lower()
+    return 2050 if ("2050" in s or "slr" in s) else 2018
+
+
+def layer_filename(ftype="coastal", rp=100, scenario="today") -> str:
     rp = int(rp)
-    if ftype == "coastal":
-        if rp not in COASTAL_RP:
-            raise ValueError("unsupported coastal return period")
-        return f"inuncoast_historical_nosub_hist_rp{COASTAL_RP[rp]}_0.tif"
-    if rp not in RIVERINE_RP:
-        raise ValueError("unsupported return period")
-    tag = RIVERINE_RP[rp]
-    if scenario in ("2050", "2080"):
-        return f"inunriver_rcp8p5_00000NorESM1-M_{scenario}_rp{tag}.tif"
-    return f"inunriver_historical_000000000WATCH_1980_rp{tag}.tif"
+    if rp not in RPS:
+        raise ValueError("unsupported return period (use %s)" % RPS)
+    return f"deltares_{scenario_year(scenario)}_rp{rp:04d}.tif"
 
 
-def raster_path(ftype="riverine", rp=100, scenario="historical"):
-    """Resolve, download (once) and return the local path for a layer."""
-    fname = layer_filename(ftype, rp, scenario)
-    path = os.path.join(CACHE_DIR, fname)
-    if path in _ensured or os.path.exists(path):
-        _ensured.add(path)
-        return path
-    import urllib.request
-    import shutil
-    tmp = path + ".part"
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    req = urllib.request.Request(f"{BASE_URL}/{fname}", headers={"User-Agent": "archeve-flood/1.0"})
-    with urllib.request.urlopen(req, timeout=180) as r, open(tmp, "wb") as f:
-        shutil.copyfileobj(r, f, length=1024 * 1024)
-    os.replace(tmp, path)
-    try:
-        from rasterio.enums import Resampling
-        with rasterio.open(path, "r+") as ds:
-            if not ds.overviews(1):
-                ds.build_overviews([2, 4, 8, 16, 32], Resampling.average)
-    except Exception:
-        pass
-    _ensured.add(path)
+def raster_path(ftype="coastal", rp=100, scenario="today") -> str:
+    """Resolve the local COG path for a layer. `ftype` is accepted for API
+    compatibility but ignored — this dataset is coastal only."""
+    path = os.path.join(DATA_DIR, layer_filename(ftype, rp, scenario))
+    if not os.path.exists(path):
+        raise FileNotFoundError("layer not available: " + os.path.basename(path))
     return path
 
 
-def _open(ftype="riverine", rp=100, scenario="historical"):
+def ready() -> bool:
+    """True once the baked-in rasters are present (they always should be)."""
+    try:
+        return os.path.exists(raster_path("coastal", 100, "today"))
+    except Exception:
+        return False
+
+
+def _open(ftype="coastal", rp=100, scenario="today"):
     return rasterio.open(raster_path(ftype, rp, scenario))
 
 
-def depth_at(lat, lon, ftype="riverine", rp=100, scenario="historical", radius_cells=2):
-    """Flood depth (m) near a point — exact ~1 km cell + max within ~2 km (the river
-    channel can fall in a neighbouring coarse cell). 0.0 = no modeled floodplain near."""
+def depth_at(lat, lon, ftype="coastal", rp=100, scenario="today", radius_cells=2):
+    """Coastal flood depth (m) near a point — exact ~1 km cell plus the max within
+    ~2 km (the inundated fringe can fall in a neighbouring cell). 0.0 = dry here."""
+    year = scenario_year(scenario)
     with _open(ftype, rp, scenario) as ds:
         try:
             row, col = ds.index(lon, lat)
@@ -99,10 +87,11 @@ def depth_at(lat, lon, ftype="riverine", rp=100, scenario="historical", radius_c
             point = 0.0 if (pv == NODATA or not np.isfinite(pv) or pv < 0) else pv
         except Exception:
             point = 0.0
-        return {"ok": True, "lat": lat, "lon": lon, "type": ftype, "rp": int(rp), "scenario": scenario,
+        return {"ok": True, "lat": lat, "lon": lon, "type": "coastal", "rp": int(rp),
+                "scenario": str(year), "year": year,
                 "depth_m": round(local_max, 2), "point_depth_m": round(point, 2),
                 "within_km": round((radius_cells + 0.5), 1), "flooded": local_max > 0,
-                "source": "WRI Aqueduct Floods v2 (CC BY 4.0)"}
+                "source": SOURCE}
 
 
 def _guard(w, s, e, n):
@@ -110,8 +99,9 @@ def _guard(w, s, e, n):
         raise ValueError("bbox too large or invalid (max %d deg)" % MAX_DEG)
 
 
-def exposure(geom=None, bbox=None, ftype="riverine", rp=100, scenario="historical"):
+def exposure(geom=None, bbox=None, ftype="coastal", rp=100, scenario="today"):
     g = shape(geom) if geom is not None else None
+    year = scenario_year(scenario)
     with _open(ftype, rp, scenario) as ds:
         w, s, e, n = g.bounds if g is not None else bbox
         _guard(w, s, e, n)
@@ -135,18 +125,18 @@ def exposure(geom=None, bbox=None, ftype="riverine", rp=100, scenario="historica
         valid = band[band != NODATA]
         flooded = valid[valid > 0]
         if valid.size == 0:
-            return {"ok": False, "error": "no land cells in area"}
+            return {"ok": False, "error": "no cells in area"}
         meanlat = (s + n) / 2.0
         cell_km2 = (ds.res[0] * 111.32 * math.cos(math.radians(meanlat))) * (ds.res[1] * 110.57) * (scale * scale)
-        return {"ok": True, "type": ftype, "rp": int(rp), "scenario": scenario,
+        return {"ok": True, "type": "coastal", "rp": int(rp), "scenario": str(year), "year": year,
                 "flooded_fraction": round(float(flooded.size) / valid.size, 4),
                 "flooded_area_km2": round(flooded.size * cell_km2, 1),
                 "mean_depth_m": round(float(flooded.mean()), 2) if flooded.size else 0.0,
                 "max_depth_m": round(float(flooded.max()), 2) if flooded.size else 0.0,
-                "source": "WRI Aqueduct Floods v2 (CC BY 4.0)"}
+                "source": SOURCE}
 
 
-def clip_geotiff(w, s, e, n, out_path, ftype="riverine", rp=100, scenario="historical"):
+def clip_geotiff(w, s, e, n, out_path, ftype="coastal", rp=100, scenario="today"):
     _guard(w, s, e, n)
     with _open(ftype, rp, scenario) as ds:
         win = from_bounds(w, s, e, n, ds.transform)

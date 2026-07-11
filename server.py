@@ -25,7 +25,7 @@ from fastapi.responses import Response, FileResponse  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from typing import Optional  # noqa: E402
 
-app = FastAPI(title="Archeve Flood Hazard (Aqueduct)", version="2.0")
+app = FastAPI(title="Archeve Flood Hazard (Deltares coastal)", version="3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
@@ -39,36 +39,26 @@ DEPTH_MAX_M = 6.0
 RAMP = ((168, 212, 255), (8, 48, 107))
 
 
-def _default_path():
-    return fh.raster_path("riverine", 100, "historical")
-
-
-@app.on_event("startup")
-def _prefetch():
-    import threading
-    threading.Thread(target=lambda: fh.raster_path("riverine", 100, "historical"), daemon=True).start()
-
-
 @app.get("/health")
 def health():
-    ok = os.path.exists(os.path.join(fh.CACHE_DIR, fh.layer_filename("riverine", 100, "historical")))
-    return {"status": "ok" if ok else "fetching_raster", "raster_present": ok}
+    ok = fh.ready()
+    return {"status": "ok" if ok else "unavailable", "raster_present": ok}
 
 
 @app.get("/layers")
 def layers():
     return {
-        "types": ["riverine", "coastal"],
+        "types": ["coastal"],
         "return_periods": fh.RPS,
-        "scenarios": ["historical", "2050", "2080"],
-        "scenario_note": "future = RCP8.5 (riverine only); coastal is historical",
-        "source": "WRI Aqueduct Floods v2 (CC BY 4.0), ~1 km",
+        "scenarios": ["today", "2050"],
+        "scenario_note": "coastal flood depth at present-day (2018) and 2050 sea-level-rise",
+        "source": fh.SOURCE,
     }
 
 
 @app.get("/depth")
 def depth(lat: float = Query(...), lon: float = Query(...),
-          type: str = "riverine", rp: int = 100, scenario: str = "historical"):
+          type: str = "coastal", rp: int = 100, scenario: str = "today"):
     try:
         return fh.depth_at(lat, lon, ftype=type, rp=rp, scenario=scenario)
     except ValueError as e:
@@ -86,7 +76,7 @@ def _bbox(b):
 
 
 @app.get("/exposure")
-def exposure_bbox(bbox: str = Query(...), type: str = "riverine", rp: int = 100, scenario: str = "historical"):
+def exposure_bbox(bbox: str = Query(...), type: str = "coastal", rp: int = 100, scenario: str = "today"):
     try:
         res = fh.exposure(bbox=_bbox(bbox), ftype=type, rp=rp, scenario=scenario)
     except ValueError as e:
@@ -98,9 +88,9 @@ def exposure_bbox(bbox: str = Query(...), type: str = "riverine", rp: int = 100,
 
 class GeomReq(BaseModel):
     geometry: Optional[dict] = None
-    type: Optional[str] = "riverine"
+    type: Optional[str] = "coastal"
     rp: Optional[int] = 100
-    scenario: Optional[str] = "historical"
+    scenario: Optional[str] = "today"
     features: Optional[list] = None
 
 
@@ -112,7 +102,7 @@ def exposure_geom(req: GeomReq):
     if not geom:
         raise HTTPException(status_code=400, detail="no geometry")
     try:
-        res = fh.exposure(geom=geom, ftype=req.type or "riverine", rp=req.rp or 100, scenario=req.scenario or "historical")
+        res = fh.exposure(geom=geom, ftype=req.type or "coastal", rp=req.rp or 100, scenario=req.scenario or "today")
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     if not res.get("ok"):
@@ -121,7 +111,7 @@ def exposure_geom(req: GeomReq):
 
 
 @app.get("/download")
-def download(bbox: str = Query(...), name: str = "flood", type: str = "riverine", rp: int = 100, scenario: str = "historical"):
+def download(bbox: str = Query(...), name: str = "flood", type: str = "coastal", rp: int = 100, scenario: str = "today"):
     w, s, e, n = _bbox(bbox)
     out = os.path.join(tempfile.gettempdir(), f"{name}_{type}_rp{rp}_{scenario}.tif")
     try:
@@ -147,7 +137,7 @@ def _empty_tile():
 
 
 @app.get("/tiles/{z}/{x}/{y}.png")
-def tiles(z: int, x: int, y: int, type: str = "riverine", rp: int = 100, scenario: str = "historical"):
+def tiles(z: int, x: int, y: int, type: str = "coastal", rp: int = 100, scenario: str = "today"):
     from rio_tiler.io import Reader
     from rio_tiler.errors import TileOutsideBounds
     from PIL import Image

@@ -3,3 +3,6 @@ __pycache__/
 *.tif
 *.pyc
 .github/
+
+# …but the baked-in flood clips MUST ship in the image
+!data/*.tif
